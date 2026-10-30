@@ -71,5 +71,13 @@ class CoverageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'too complex'):
                 canopy.solve(self.data)
 
+    def test_scenario_work_is_bounded_before_solver_calls(self):
+        slots = [{'shift': 'S', 'role': 'Food', 'requires': '-'}]
+        available = [{'shift': 'S', 'person': f'P{i:02d}'} for i in range(50)]
+        training = [{'person': f'P{i:02d}', 'role': 'Food'} for i in range(20)]
+        with patch.object(canopy, 'solve', side_effect=AssertionError('solver must not run')):
+            with self.assertRaisesRegex(ValueError, 'scenario limit'):
+                canopy.report((slots, available, [], training))
+
 if __name__ == '__main__': unittest.main()
 
