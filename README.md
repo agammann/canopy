@@ -24,7 +24,7 @@ Use consistent identifiers and CSV quoting. One person covers at most one role p
 
 ## Limitations
 
-Alpha prototype, not validated scheduling, safety, legal or staffing advice. It assumes complete, correct data and cannot model fatigue, preferences, travel, role priorities, training costs, supervision ratios, or fairness. A coordinator must verify qualifications and decide independently. Exhaustive search is for small cases (maximum 18 slots) and can be slow below that limit. Data stays in local files and terminal; protect personal reports. No coordinator co-design has yet been performed.
+Alpha prototype, not validated scheduling, safety, legal or staffing advice. It assumes complete, correct data and cannot model fatigue, preferences, travel, role priorities, training costs, supervision ratios, or fairness. A coordinator must verify qualifications and decide independently. Exhaustive search is for small cases (maximum 18 slots). If a case exceeds the search budget, Canopy stops with an explicit error instead of presenting a partial answer; reduce roles or candidates and retry. Data stays in local files and terminal; protect personal reports. No coordinator co-design has yet been performed.
 
 [VolunteerShiftAI](https://github.com/HeroicSwan/volunteershift-ai) provides nonprofit scheduling with cost and fairness constraints. [Better Impact](https://www.betterimpact.com/volunteer-management-software) provides broader volunteer management, scheduling and training. Canopy explores counterfactual coverage and proposed training under explicit assumptions. This is not a uniqueness claim; demand remains unvalidated.
 
@@ -32,4 +32,4 @@ MIT licensed; original clean-room code, no third-party runtime dependencies.
 
 ## Local interface
 
-Run `python ui.py` to open the local interface. It binds to a random loopback port; stop it with Ctrl+C. Load four CSV files or the fictional example, optionally enter two exact person IDs, and select Analyze coverage. Download a text report or use Print report. Inputs are processed in memory and are not saved by Canopy. Browser downloads and printed copies are your responsibility. The interface supports one manual pair; the CLI can compare several. The interface and exhaustive analysis are intended for small trusted local datasets, not network deployment.
+Run `python ui.py` to open the local interface. It binds to a random loopback port and rejects requests with a nonlocal Host header; stop it with Ctrl+C. Load four CSV files or the fictional example, optionally enter two exact person IDs, and select Analyze coverage. Download a text report or use Print report. Inputs are processed in memory and are not saved by Canopy. Browser downloads and printed copies are your responsibility. The interface supports one manual pair; the CLI can compare several. The interface and exhaustive analysis are intended for small trusted local datasets, not network deployment.
