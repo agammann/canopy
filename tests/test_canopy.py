@@ -1,4 +1,6 @@
+import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 import canopy
 
@@ -34,6 +36,40 @@ class CoverageTests(unittest.TestCase):
             for p in (Path(__file__).resolve().parents[1] / 'examples').iterdir(): shutil.copy(p, tmp)
             (Path(tmp) / 'roster.csv').write_text('shift,role,requires\nMorning,Food,Supervisor\n')
             with self.assertRaises(ValueError): canopy.load(tmp)
+    def test_impossible_supervisor_does_not_explore_every_assignment(self):
+        count = 8
+        slots = [{'shift': 'S', 'role': 'Supervisor', 'requires': '-'}]
+        slots += [{'shift': 'S', 'role': f'R{i}', 'requires': 'Supervisor'} for i in range(count)]
+        people = [f'P{i}' for i in range(count)]
+        available = [{'shift': 'S', 'person': person} for person in people]
+        qualified = [{'person': person, 'role': f'R{i}'} for person in people for i in range(count)]
+        visits = 0
+        def guard(frame, event, _arg):
+            nonlocal visits
+            if event == 'call' and frame.f_code.co_name == 'visit' and frame.f_code.co_filename == canopy.__file__:
+                visits += 1
+                if visits > 5000:
+                    raise AssertionError('solver explored too many impossible assignments')
+        prior = sys.getprofile()
+        try:
+            sys.setprofile(guard)
+            result, _ = canopy.solve((slots, available, qualified, []))
+        finally:
+            sys.setprofile(prior)
+        self.assertEqual(result[0], 0)
+    def test_later_supervisor_still_uses_an_available_person(self):
+        slots = [{'shift': 'S', 'role': 'Food', 'requires': 'Supervisor'},
+                 {'shift': 'S', 'role': 'Supervisor', 'requires': '-'}]
+        available = [{'shift': 'S', 'person': person} for person in ('Ada', 'Bo')]
+        qualified = [{'person': 'Ada', 'role': 'Food'},
+                     {'person': 'Ada', 'role': 'Supervisor'},
+                     {'person': 'Bo', 'role': 'Food'}]
+        result, _ = canopy.solve((slots, available, qualified, []))
+        self.assertEqual(result, (2, ['Bo', 'Ada']))
+    def test_search_limit_returns_error_instead_of_partial_result(self):
+        with patch.object(canopy, 'MAX_SOLVE_VISITS', 2):
+            with self.assertRaisesRegex(ValueError, 'too complex'):
+                canopy.solve(self.data)
 
 if __name__ == '__main__': unittest.main()
 

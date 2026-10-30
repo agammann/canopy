@@ -2,13 +2,15 @@ import io
 import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 import ui
 
 class InterfaceTests(unittest.TestCase):
-    def handler(self, method, path, body=b'', token=None):
+    def handler(self, method, path, body=b'', token=None, host='127.0.0.1:8765'):
         handler = ui.Handler.__new__(ui.Handler)
+        handler.server = SimpleNamespace(server_port=8765)
         handler.path = path
-        handler.headers = {'Content-Length': str(len(body))}
+        handler.headers = {'Content-Length': str(len(body)), 'Host': host}
         if token: handler.headers['X-Canopy-Token'] = token
         handler.rfile = io.BytesIO(body)
         output = []
@@ -34,5 +36,22 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b'Plan for absence', raw)
         self.assertNotIn(b'__TOKEN__', raw)
+
+    def test_loopback_host_names_with_the_bound_port_work(self):
+        for host in ('127.0.0.1:8765', 'localhost:8765'):
+            with self.subTest(host=host):
+                status, raw = self.handler('GET', '/', host=host)
+                self.assertEqual(status, 200)
+                self.assertIn(ui.TOKEN.encode(), raw)
+    def test_foreign_or_malformed_host_cannot_read_token_or_submit_analysis(self):
+        for host in ('foreign.example:8765', '127.0.0.1:9999', '127.0.0.1:8765.evil',
+                     '[::1]:8765',
+                     'localhost:8765@foreign.example', '[::1', '', '127.0.0.1'):
+            with self.subTest(host=host):
+                status, raw = self.handler('GET', '/', host=host)
+                self.assertEqual(status, 403)
+                self.assertNotIn(ui.TOKEN.encode(), raw)
+                status, _ = self.handler('POST', '/analyze', b'{}', ui.TOKEN, host=host)
+                self.assertEqual(status, 403)
 
 if __name__ == '__main__': unittest.main()

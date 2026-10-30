@@ -13,6 +13,9 @@ MAX_BODY = 1_000_000
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # Do not log names or input.
+    def local_host(self):
+        port = self.server.server_port
+        return self.headers.get('Host') in {f'127.0.0.1:{port}', f'localhost:{port}'}
     def send(self, status, body, content_type):
         self.send_response(status)
         self.send_header('Content-Type', content_type)
@@ -22,6 +25,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     def do_GET(self):
+        if not self.local_host():
+            self.send(403, b'Forbidden', 'text/plain'); return
         if self.path == '/':
             body = (ROOT / 'ui.html').read_text(encoding='utf-8').replace('__TOKEN__', TOKEN).encode('utf-8')
             self.send(200, body, 'text/html; charset=utf-8')
@@ -31,6 +36,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send(404, b'Not found', 'text/plain')
     def do_POST(self):
+        if not self.local_host():
+            self.send(403, b'Forbidden', 'text/plain'); return
         if self.path != '/analyze' or self.headers.get('X-Canopy-Token') != TOKEN:
             self.send(403, b'Forbidden', 'text/plain'); return
         try:
