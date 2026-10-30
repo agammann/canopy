@@ -6,13 +6,20 @@ from pathlib import Path
 
 MAX_SOLVE_VISITS = 100_000
 MAX_REPORT_VISITS = 500_000
+MAX_CSV_ROWS = 500
+MAX_PEOPLE = 100
+MAX_SCENARIO_SOLVES = 500
 
 
 def read_text(text, name, fields):
     reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff"), newline=""))
     if reader.fieldnames != fields:
         raise ValueError(f'{name}: expected columns {fields}')
-    rows = list(reader)
+    rows = []
+    for row in reader:
+        if len(rows) >= MAX_CSV_ROWS:
+            raise ValueError(f'{name}: at most {MAX_CSV_ROWS} rows')
+        rows.append(row)
     if any(None in row or not all(row.values()) or any(not v.strip() for v in row.values()) for row in rows):
         raise ValueError(f'{name}: empty or extra field')
     if len({tuple(r.values()) for r in rows}) != len(rows):
@@ -37,6 +44,8 @@ def load_texts(texts):
         raise ValueError('each role must be unique within a shift')
     shifts = {r['shift'] for r in slots}
     people = {r['person'] for r in avail}
+    if len(people) > MAX_PEOPLE:
+        raise ValueError(f'availability.csv: at most {MAX_PEOPLE} people')
     if any(r['shift'] not in shifts for r in avail):
         raise ValueError('availability references unknown shift')
     if any(r['person'] not in people for r in skills + training):
@@ -109,9 +118,14 @@ def solve(data, absent=(), extra=None, budget=None):
 def report(data, pairs=()):
     slots, avail, skills, training = data
     people = sorted({r['person'] for r in avail})
-    scenarios = [()] + [(p,) for p in people] + list(pairs)
+    if len(people) > MAX_PEOPLE:
+        raise ValueError(f'analysis allows at most {MAX_PEOPLE} people')
+    pairs = list(pairs)
     if any(len(x) != 2 or len(set(x)) != 2 or not set(x) <= set(people) for x in pairs):
         raise ValueError('each pair must contain two distinct known people')
+    if (1 + len(people) + len(pairs)) * (1 + len(training)) > MAX_SCENARIO_SOLVES:
+        raise ValueError(f'analysis exceeds the {MAX_SCENARIO_SOLVES} scenario limit; reduce people, pairs, or training options')
+    scenarios = [()] + [(p,) for p in people] + pairs
     lines = ['CANOPY - coverage evidence', 'Planning only: assignments below are hypothetical, not invitations or permission.', 'Assumptions: each person covers at most one role per shift; availability and qualifications are complete; required supervisor roles must be covered in the same shift.', '']
     baseline_scores = []
     budget = [MAX_REPORT_VISITS]

@@ -1,5 +1,9 @@
 import io
+import http.client
 import json
+import socket
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +17,8 @@ class InterfaceTests(unittest.TestCase):
         handler.headers = {'Content-Length': str(len(body)), 'Host': host}
         if token: handler.headers['X-Canopy-Token'] = token
         handler.rfile = io.BytesIO(body)
+        handler._arm_read_deadline = lambda: None
+        handler._clear_read_deadline = lambda: None
         output = []
         handler.send = lambda status, content, mime: output.append((status, content))
         getattr(handler, 'do_' + method)()
@@ -53,5 +59,141 @@ class InterfaceTests(unittest.TestCase):
                 self.assertNotIn(ui.TOKEN.encode(), raw)
                 status, _ = self.handler('POST', '/analyze', b'{}', ui.TOKEN, host=host)
                 self.assertEqual(status, 403)
+
+    def test_many_people_are_rejected_before_repeated_analysis(self):
+        files = {
+            'roster': 'shift,role,requires\nS,Food,-\n',
+            'availability': 'shift,person\n' + ''.join(f'S,P{i:04d}\n' for i in range(4000)),
+            'qualifications': 'person,role\n',
+            'training': 'person,role\n',
+        }
+        body = json.dumps({'files': files, 'pairs': []}).encode()
+        self.assertLess(len(body), ui.MAX_BODY)
+        status, raw = self.handler('POST', '/analyze', body, ui.TOKEN)
+        self.assertEqual(status, 400)
+        self.assertIn('at most', json.loads(raw)['error'])
+
+    def test_incomplete_local_requests_release_the_interface(self):
+        for partial_request in (
+            b'GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n',
+            b'POST /analyze HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n'
+            b'X-Canopy-Token: {token}\r\nContent-Length: 100\r\n\r\n{{',
+        ):
+            with self.subTest(partial_request=partial_request[:4]):
+                server = ui.BoundedHTTPServer(('127.0.0.1', 0), ui.Handler)
+                server_errors = []
+                server.handle_error = lambda *args: server_errors.append(args)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                stalled = socket.create_connection(('127.0.0.1', server.server_port), timeout=3)
+                second = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                try:
+                    stalled.sendall(partial_request.replace(b'{port}', str(server.server_port).encode())
+                                    .replace(b'{token}', ui.TOKEN.encode()))
+                    time.sleep(0.05)
+                    start = time.monotonic()
+                    second.request('GET', '/example')
+                    response = second.getresponse()
+                    response.read()
+                    self.assertEqual(response.status, 200)
+                    self.assertLess(time.monotonic() - start, 0.8)
+                    if partial_request.startswith(b'POST'):
+                        stalled.settimeout(1)
+                        self.assertIn(b'408 Request Timeout', stalled.recv(256))
+                finally:
+                    second.close()
+                    stalled.close()
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=3)
+                self.assertFalse(server_errors)
+
+    def test_many_incomplete_clients_have_bounded_workers(self):
+        started = threading.Event()
+        release = threading.Event()
+        count_lock = threading.Lock()
+        active = 0
+        peak = 0
+
+        class PausedHandler(ui.Handler):
+            def setup(self):
+                nonlocal active, peak
+                super().setup()
+                with count_lock:
+                    active += 1
+                    peak = max(peak, active)
+                    if active == ui.MAX_ACTIVE_REQUESTS:
+                        started.set()
+                release.wait(timeout=3)
+            def finish(self):
+                nonlocal active
+                try:
+                    super().finish()
+                finally:
+                    with count_lock:
+                        active -= 1
+
+        server = ui.BoundedHTTPServer(('127.0.0.1', 0), PausedHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        clients = []
+        try:
+            for _ in range(10):
+                client = socket.create_connection(('127.0.0.1', server.server_port), timeout=2)
+                clients.append(client)
+                client.sendall(b'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n')
+            self.assertTrue(started.wait(timeout=2))
+            with count_lock:
+                self.assertEqual(peak, ui.MAX_ACTIVE_REQUESTS)
+            clients[-1].settimeout(1)
+            busy_reply = bytearray()
+            while chunk := clients[-1].recv(1024):
+                busy_reply.extend(chunk)
+            self.assertIn(b'503 Service Unavailable', busy_reply)
+            self.assertIn(b'The local interface is busy. Retry in a moment.', busy_reply)
+        finally:
+            release.set()
+            for client in clients:
+                client.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_slow_input_drip_has_an_absolute_deadline(self):
+        for partial_request in (
+            b'GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Slow: ',
+            b'POST /analyze HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n'
+            b'X-Canopy-Token: {token}\r\nContent-Length: 100\r\n\r\n{',
+        ):
+            with self.subTest(partial_request=partial_request[:4]):
+                server = ui.BoundedHTTPServer(('127.0.0.1', 0), ui.Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                stalled = socket.create_connection(('127.0.0.1', server.server_port), timeout=3)
+                stopped = threading.Event()
+                drip = None
+                try:
+                    stalled.settimeout(3)
+                    stalled.sendall(partial_request.replace(b'{port}', str(server.server_port).encode())
+                                    .replace(b'{token}', ui.TOKEN.encode()))
+                    def keep_sending():
+                        while not stopped.wait(0.2):
+                            try:
+                                stalled.sendall(b'x')
+                            except OSError:
+                                return
+                    drip = threading.Thread(target=keep_sending, daemon=True)
+                    start = time.monotonic()
+                    drip.start()
+                    self.assertEqual(stalled.recv(256), b'')
+                    self.assertLess(time.monotonic() - start, 2.8)
+                finally:
+                    stopped.set()
+                    stalled.close()
+                    if drip:
+                        drip.join(timeout=1)
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=3)
 
 if __name__ == '__main__': unittest.main()
