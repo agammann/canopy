@@ -2,10 +2,11 @@
 import json
 import secrets
 import socket
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import BoundedSemaphore, Lock, Timer
+from threading import BoundedSemaphore, Lock, Thread, Timer
 import canopy
 
 ROOT = Path(__file__).resolve().parent
@@ -14,6 +15,10 @@ MAX_BODY = 1_000_000
 READ_TIMEOUT_SECONDS = 1.0
 READ_DEADLINE_SECONDS = 2.0
 MAX_ACTIVE_REQUESTS = 4
+MAX_BUSY_RESPONSES = 8
+BUSY_READ_DEADLINE_SECONDS = 0.2
+BUSY_IO_TIMEOUT_SECONDS = 0.05
+MAX_BUSY_HEADER_BYTES = 16_384
 BUSY_BODY = b'{"error":"The local interface is busy. Retry in a moment."}'
 
 class BoundedHTTPServer(ThreadingHTTPServer):
@@ -22,18 +27,20 @@ class BoundedHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self._request_slots = BoundedSemaphore(MAX_ACTIVE_REQUESTS)
+        self._busy_slots = BoundedSemaphore(MAX_BUSY_RESPONSES)
         super().__init__(*args, **kwargs)
 
     def process_request(self, request, client_address):
         if not self._request_slots.acquire(blocking=False):
+            if not self._busy_slots.acquire(blocking=False):
+                self.shutdown_request(request)
+                return
             try:
-                reply = (b'HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n'
-                         b'Content-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: '
-                         + str(len(BUSY_BODY)).encode() + b'\r\n\r\n' + BUSY_BODY)
-                request.sendall(reply)
-            except OSError:
-                pass
-            self.shutdown_request(request)
+                Thread(target=self._send_busy, args=(request,), daemon=True).start()
+            except BaseException:
+                self._busy_slots.release()
+                self.shutdown_request(request)
+                raise
             return
         try:
             super().process_request(request, client_address)
@@ -46,6 +53,61 @@ class BoundedHTTPServer(ThreadingHTTPServer):
             super().process_request_thread(request, client_address)
         finally:
             self._request_slots.release()
+
+    def _send_busy(self, request):
+        try:
+            # Drain a bounded complete request off the accept thread. Closing
+            # with unread request bytes can reset the response on Windows.
+            deadline = time.monotonic() + BUSY_READ_DEADLINE_SECONDS
+            header = bytearray()
+            received = 0
+            expected = None
+            while received < MAX_BODY + MAX_BUSY_HEADER_BYTES:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                request.settimeout(min(BUSY_IO_TIMEOUT_SECONDS, remaining))
+                try:
+                    chunk = request.recv(min(16384, MAX_BODY + MAX_BUSY_HEADER_BYTES - received))
+                except TimeoutError:
+                    continue
+                if not chunk:
+                    break
+                received += len(chunk)
+                if expected is None:
+                    header.extend(chunk)
+                    marker = header.find(b'\r\n\r\n')
+                    if marker < 0:
+                        if len(header) >= MAX_BUSY_HEADER_BYTES:
+                            break
+                        continue
+                    if marker + 4 > MAX_BUSY_HEADER_BYTES:
+                        break
+                    fields = header[:marker].lower().split(b'\r\n')[1:]
+                    lengths = [line.split(b':', 1)[1].strip() for line in fields if line.startswith(b'content-length:')]
+                    if any(line.startswith(b'transfer-encoding:') for line in fields) or len(lengths) > 1:
+                        break
+                    if lengths and (not lengths[0].isdigit() or len(lengths[0]) > 7):
+                        break
+                    length = int(lengths[0]) if lengths else 0
+                    if length > MAX_BODY:
+                        break
+                    expected = marker + 4 + length
+                    header.clear()
+                if received >= expected:
+                    break
+            request.settimeout(BUSY_IO_TIMEOUT_SECONDS)
+            reply = (b'HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n'
+                     b'Content-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: '
+                     + str(len(BUSY_BODY)).encode() + b'\r\n\r\n' + BUSY_BODY)
+            request.sendall(reply)
+        except OSError:
+            pass
+        finally:
+            try:
+                self.shutdown_request(request)
+            finally:
+                self._busy_slots.release()
 
 class Handler(BaseHTTPRequestHandler):
     def setup(self):

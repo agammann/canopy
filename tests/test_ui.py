@@ -159,6 +159,202 @@ class InterfaceTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+    def test_busy_response_reaches_http_clients_without_waiting_for_input(self):
+        started = threading.Event()
+        release = threading.Event()
+        count_lock = threading.Lock()
+        active = 0
+
+        class PausedHandler(ui.Handler):
+            def setup(self):
+                nonlocal active
+                super().setup()
+                with count_lock:
+                    active += 1
+                    if active == ui.MAX_ACTIVE_REQUESTS:
+                        started.set()
+                release.wait(timeout=3)
+
+        server = ui.BoundedHTTPServer(('127.0.0.1', 0), PausedHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        clients = []
+        try:
+            for _ in range(ui.MAX_ACTIVE_REQUESTS):
+                client = socket.create_connection(('127.0.0.1', server.server_port), timeout=2)
+                clients.append(client)
+                client.sendall(b'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n')
+            self.assertTrue(started.wait(timeout=2))
+            for _ in range(8):
+                connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=2)
+                try:
+                    connection.request('GET', '/example')
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 503)
+                    self.assertIn(b'busy', response.read())
+                finally:
+                    connection.close()
+            for size in (100_000, ui.MAX_BODY):
+                connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=2)
+                try:
+                    connection.request('POST', '/analyze', body=b'x' * size)
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 503)
+                    self.assertIn(b'busy', response.read())
+                finally:
+                    connection.close()
+            fragmented = socket.create_connection(('127.0.0.1', server.server_port), timeout=2)
+            clients.append(fragmented)
+            fragmented.settimeout(1)
+            fragmented.sendall(b'POST /analyze HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\nabc')
+            time.sleep(0.02)
+            fragmented.sendall(b'def')
+            response = http.client.HTTPResponse(fragmented)
+            response.begin()
+            self.assertEqual(response.status, 503)
+            self.assertIn(b'busy', response.read())
+            silent = socket.create_connection(('127.0.0.1', server.server_port), timeout=2)
+            clients.append(silent)
+            silent.settimeout(1)
+            start = time.monotonic()
+            self.assertIn(b'503 Service Unavailable', silent.recv(1024))
+            self.assertLess(time.monotonic() - start, 0.8)
+        finally:
+            release.set()
+            for client in clients:
+                client.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_busy_read_does_not_block_accepting_a_later_request(self):
+        started = threading.Event()
+        release_workers = threading.Event()
+        busy_started = threading.Event()
+        release_busy = threading.Event()
+        count_lock = threading.Lock()
+        active = 0
+        completed = 0
+        finished = threading.Event()
+
+        class PausedHandler(ui.Handler):
+            def setup(self):
+                nonlocal active
+                super().setup()
+                with count_lock:
+                    active += 1
+                    if active == ui.MAX_ACTIVE_REQUESTS:
+                        started.set()
+                release_workers.wait(timeout=3)
+        class GatedServer(ui.BoundedHTTPServer):
+            def _send_busy(self, request):
+                busy_started.set()
+                release_busy.wait(timeout=2)
+                super()._send_busy(request)
+            def process_request_thread(self, request, client_address):
+                nonlocal completed
+                try:
+                    super().process_request_thread(request, client_address)
+                finally:
+                    with count_lock:
+                        completed += 1
+                        if completed == ui.MAX_ACTIVE_REQUESTS:
+                            finished.set()
+
+        server = GatedServer(('127.0.0.1', 0), PausedHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        clients = []
+        try:
+            for _ in range(ui.MAX_ACTIVE_REQUESTS):
+                client = socket.create_connection(('127.0.0.1', server.server_port), timeout=2)
+                clients.append(client)
+                client.sendall(b'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n')
+            self.assertTrue(started.wait(timeout=2))
+            silent = socket.create_connection(('127.0.0.1', server.server_port), timeout=2)
+            clients.append(silent)
+            self.assertTrue(busy_started.wait(timeout=2))
+            release_workers.set()
+            for client in clients[:-1]:
+                client.close()
+            self.assertTrue(finished.wait(timeout=2))
+            connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=1)
+            try:
+                connection.request('GET', '/example')
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                response.read()
+            finally:
+                connection.close()
+        finally:
+            release_workers.set()
+            release_busy.set()
+            for client in clients:
+                client.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_busy_response_workers_are_bounded(self):
+        started = threading.Event()
+        release_workers = threading.Event()
+        busy_full = threading.Event()
+        release_busy = threading.Event()
+        count_lock = threading.Lock()
+        active = 0
+        busy = 0
+        peak = 0
+
+        class PausedHandler(ui.Handler):
+            def setup(self):
+                nonlocal active
+                super().setup()
+                with count_lock:
+                    active += 1
+                    if active == ui.MAX_ACTIVE_REQUESTS:
+                        started.set()
+                release_workers.wait(timeout=3)
+
+        class GatedServer(ui.BoundedHTTPServer):
+            def _send_busy(self, request):
+                nonlocal busy, peak
+                with count_lock:
+                    busy += 1
+                    peak = max(peak, busy)
+                    if busy == ui.MAX_BUSY_RESPONSES:
+                        busy_full.set()
+                release_busy.wait(timeout=2)
+                try:
+                    super()._send_busy(request)
+                finally:
+                    with count_lock:
+                        busy -= 1
+
+        server = GatedServer(('127.0.0.1', 0), PausedHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        clients = []
+        try:
+            for _ in range(ui.MAX_ACTIVE_REQUESTS):
+                client = socket.create_connection(('127.0.0.1', server.server_port), timeout=2)
+                clients.append(client)
+                client.sendall(b'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n')
+            self.assertTrue(started.wait(timeout=2))
+            for _ in range(ui.MAX_BUSY_RESPONSES + 2):
+                clients.append(socket.create_connection(('127.0.0.1', server.server_port), timeout=2))
+            self.assertTrue(busy_full.wait(timeout=2))
+            with count_lock:
+                self.assertEqual(peak, ui.MAX_BUSY_RESPONSES)
+            self.assertFalse(server._busy_slots.acquire(blocking=False))
+        finally:
+            release_workers.set()
+            release_busy.set()
+            for client in clients:
+                client.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_slow_input_drip_has_an_absolute_deadline(self):
         for partial_request in (
             b'GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Slow: ',
