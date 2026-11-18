@@ -21,6 +21,11 @@ class CoverageTests(unittest.TestCase):
         self.assertIn('Cy -> Supervisor', text)
     def test_invalid_pair(self):
         with self.assertRaises(ValueError): canopy.report(self.data, [('Ada', 'Ada')])
+    def test_duplicate_pair_cannot_count_twice_in_training_scores(self):
+        for other in [('Ada', 'Bo'), ('Bo', 'Ada')]:
+            with self.subTest(other=other):
+                with self.assertRaisesRegex(ValueError, 'only once'):
+                    canopy.report(self.data, [('Ada', 'Bo'), other])
     def test_self_supervision_rejected(self):
         texts = {n: (Path(__file__).resolve().parents[1] / 'examples' / (n + '.csv')).read_text(encoding='utf-8-sig') for n in ('roster', 'availability', 'qualifications', 'training')}
         texts['roster'] = 'shift,role,requires\nMorning,Food,Food\n'

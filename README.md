@@ -1,15 +1,15 @@
 # Canopy
 
-Experimental offline planning for small volunteer teams. Compare a baseline, every single-person absence, optional two-person absences, and individually proposed training options. Outputs hypothetical coverage witnesses, never invitations or assignments.
+Canopy compares how absences and proposed training affect coverage for a small volunteer team. It models a baseline, each single-person absence and optional pairs. The reports show hypothetical ways to cover roles. A coordinator checks the assumptions, verifies qualifications and makes any staffing decision independently.
 
-Requires Python 3.10+. No dependencies. Run:
+Canopy requires Python 3.10 or newer and uses only the standard library. Run these commands from this directory.
 
 ```sh
 python canopy.py examples --pair Ada,Bo > report.txt
 python -m unittest discover -s tests -v
 ```
 
-The example is entirely fictional. Print the plain-text report from an editor. Training Cy as a supervisor restores both roles when Ada is absent.
+The fictional example covers both roles with nobody absent. When Ada is absent, both roles are uncovered. In that scenario, qualifying Cy as a supervisor makes both roles coverable. Open or print the plain-text report from an editor. Use `--pair` once per distinct pair for additional two-person scenarios. The order of the two people does not change the scenario.
 
 ## CSV format
 
@@ -24,7 +24,9 @@ Use consistent identifiers and CSV quoting. One person covers at most one role p
 
 ## Limitations
 
-Alpha prototype, not validated scheduling, safety, legal or staffing advice. It assumes complete, correct data and cannot model fatigue, preferences, travel, role priorities, training costs, supervision ratios, or fairness. A coordinator must verify qualifications and decide independently. Exhaustive search is for small cases (maximum 18 slots, 100 people, 500 rows per CSV, 256 characters per field, and 500 total scenario solves including training). The report is limited to 1,000,000 bytes when JSON-encoded for the interface. If a case exceeds a limit, Canopy stops with an explicit error instead of presenting a partial answer; reduce field lengths, roles, people, or training options and retry. Data stays in local files and terminal; protect personal reports. No coordinator co-design has yet been performed.
+Canopy assumes complete availability and qualification data. Its model excludes fatigue, preferences, travel, role priorities, training costs, supervision ratios and fairness. Use the evidence for hypothetical coverage planning and verify staffing and safety requirements independently. No coordinator co-design has been performed.
+
+Exhaustive search supports small cases with up to 18 slots, 100 people, 500 rows per CSV, 256 characters per field and 500 total scenario solves including training. The JSON-encoded report is limited to 1,000,000 bytes. Exceeding a limit stops the analysis with an error. Reduce field lengths, roles, people or training options and try again. Protect any reports containing personal information.
 
 [VolunteerShiftAI](https://github.com/HeroicSwan/volunteershift-ai) provides nonprofit scheduling with cost and fairness constraints. [Better Impact](https://www.betterimpact.com/volunteer-management-software) provides broader volunteer management, scheduling and training. Canopy explores counterfactual coverage and proposed training under explicit assumptions. This is not a uniqueness claim; demand remains unvalidated.
 
@@ -32,4 +34,11 @@ MIT licensed; original clean-room code, no third-party runtime dependencies.
 
 ## Local interface
 
-Run `python ui.py` to open the local interface. It binds to a random loopback port and rejects requests with a nonlocal Host header; stop it with Ctrl+C. Load four CSV files or the fictional example, optionally enter two exact person IDs, and select Analyze coverage. Download a text report or use Print report. Inputs are processed in memory and are not saved by Canopy. Browser downloads and printed copies are your responsibility. The interface supports one manual pair; the CLI can compare several. If the interface is busy, retry in a moment; under heavy overload a connection may close without a message. Local uploads must finish promptly, within two seconds. The interface and exhaustive analysis are intended for small trusted local datasets, not network deployment.
+Run `python ui.py` to open the local interface. If the browser does not open, use the loopback URL printed in the terminal. Stop the server with Ctrl+C.
+
+1. Select **Load example data** or choose the four CSV files.
+2. Enter both exact person IDs for a two-person scenario or leave both fields blank. The interface supports one pair. Use the CLI for several.
+3. Select **Analyze coverage** and inspect the assumptions, eligible people and coverage results. Run the analysis again after changing the files or pair.
+4. Use **Download report** for plain text or **Print report** in the browser.
+
+The server binds to a random loopback port and processes inputs in memory. Manage downloaded and printed copies separately. Local uploads must finish within two seconds. Retry if the interface is busy. An overloaded connection may close. Keep the interface on loopback and use small, trusted local datasets.

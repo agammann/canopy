@@ -182,6 +182,8 @@ def report(data, pairs=()):
     pairs = list(pairs)
     if any(len(x) != 2 or len(set(x)) != 2 or not set(x) <= set(people) for x in pairs):
         raise ValueError('each pair must contain two distinct known people')
+    if len({frozenset(pair) for pair in pairs}) != len(pairs):
+        raise ValueError('each absence pair may appear only once, in either order')
     if (1 + len(people) + len(pairs)) * (1 + len(training)) > MAX_SCENARIO_SOLVES:
         raise ValueError(f'analysis exceeds the {MAX_SCENARIO_SOLVES} scenario limit; reduce people, pairs, or training options')
     scenarios = [()] + [(p,) for p in people] + pairs
